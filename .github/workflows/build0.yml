@@ -1,0 +1,138 @@
+name: BUILD-0 official Telegram-iOS simulator
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build0.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build0:
+    runs-on: macos-26
+    timeout-minutes: 360
+    steps:
+      - name: Checkout build infrastructure
+        uses: actions/checkout@v4
+      - name: Checkout exact official upstream
+        uses: actions/checkout@v4
+        with:
+          repository: TelegramMessenger/Telegram-iOS
+          ref: 6ad963e5b62d354da79040f388ae2b9132fb17b8
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: false
+          path: upstream
+      - name: Verify provenance and toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd upstream
+          test "$(git rev-parse HEAD)" = "6ad963e5b62d354da79040f388ae2b9132fb17b8"
+          cp versions.json ../versions-record.json
+          git rev-parse HEAD > ../upstream-sha.txt
+          git submodule status --recursive > ../submodules-record.txt
+          python3 - <<'PY'
+          import json
+          v=json.load(open("versions.json"))
+          assert v["app"]=="12.9.2", v
+          assert v["macos"]=="26", v
+          assert v["xcode"]=="26.2", v
+          assert v["bazel"].split(":")[0]=="8.4.2", v
+          PY
+          test "$(sw_vers -productVersion | cut -d. -f1)" = "26"
+          sudo xcode-select -s /Applications/Xcode_26.2.app/Contents/Developer
+          xcodebuild -version | tee ../xcode-version.txt
+          grep -qx 'Xcode 26.2' ../xcode-version.txt
+          swift --version | tee ../swift-version.txt
+          sw_vers | tee ../macos-version.txt
+          date -u +%Y-%m-%dT%H:%M:%SZ > ../build0-date.txt
+      - name: Prepare compile-only configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd upstream
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          c=json.loads(Path("build-system/template_minimal_development_configuration.json").read_text())
+          c.update(bundle_id="org.veilgram.buildzero.Telegram",
+                   api_id="1", api_hash="0"*32, team_id="AAAAAAAAAA",
+                   app_specific_url_scheme="veilgram-buildzero")
+          Path("build0-configuration.json").write_text(json.dumps(c))
+          PY
+          # The pinned Make.py accepts --bazelArguments but does not use it.
+          # This explicit Bazel build flag disables provisioning on simulator.
+          printf '\nbuild --//Telegram:disableProvisioningProfiles\n' >> .bazelrc
+          git diff -- .bazelrc > ../simulator-build-config.diff
+      - name: Compile Telegram simulator target
+        shell: bash
+        run: |
+          set -uo pipefail
+          cd upstream
+          python3 -u build-system/Make/Make.py \
+            --cacheDir="$RUNNER_TEMP/telegram-bazel-cache" \
+            build \
+            --configurationPath=build0-configuration.json \
+            --xcodeManagedCodesigning \
+            --configuration=debug_sim_arm64 \
+            --buildNumber=1 2>&1 | tee ../build0.log
+          result=${PIPESTATUS[0]}
+          printf '%s\n' "$result" > ../build0-exit-code.txt
+          exit "$result"
+      - name: Record build evidence
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          {
+            echo "date_utc=$(cat build0-date.txt 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "build_repo_sha=$GITHUB_SHA"
+            echo "upstream_sha=$(cat upstream-sha.txt 2>/dev/null || echo unavailable)"
+            echo "telegram_version=$(python3 -c 'import json; print(json.load(open("versions-record.json"))["app"])' 2>/dev/null || echo unavailable)"
+            echo "macos_version=$(sw_vers -productVersion)"
+            echo "xcode_version=$(head -1 xcode-version.txt 2>/dev/null || echo unavailable)"
+            echo "swift_version=$(head -1 swift-version.txt 2>/dev/null || echo unavailable)"
+            echo "bazel_requirement=8.4.2"
+            bazel_bin="$(find upstream/build-input -maxdepth 1 -type f -name 'bazel-8.4.2-darwin-*' -print -quit 2>/dev/null)"
+            if [ -n "$bazel_bin" ]; then echo "bazel_version=$("$bazel_bin" --version)"; else echo "bazel_version=unavailable"; fi
+            echo "configuration=debug_sim_arm64"
+            echo "target=Telegram/Telegram"
+            echo "signing_provisioning=simulator-disabled-by-Bazel-flag"
+            echo "result_exit_code=$(cat build0-exit-code.txt 2>/dev/null || echo unavailable)"
+          } > build0-metadata.txt
+          if [ -f build0.log ]; then shasum -a 256 build0.log > build0-log.sha256; fi
+          if [ -d upstream/bazel-bin ]; then
+            find -L upstream/bazel-bin/Telegram -maxdepth 2 -type d -name '*.app' -print 2>/dev/null > build0-artifact-paths.txt || true
+            while IFS= read -r app; do
+              archive="build0-simulator-app.zip"
+              ditto -c -k --sequesterRsrc --keepParent "$app" "$archive"
+              shasum -a 256 "$archive" > build0-artifact.sha256
+              break
+            done < build0-artifact-paths.txt
+          fi
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build0-evidence
+          path: |
+            build0.log
+            build0-exit-code.txt
+            build0-metadata.txt
+            build0-log.sha256
+            build0-artifact-paths.txt
+            build0-artifact.sha256
+            build0-simulator-app.zip
+            build0-date.txt
+            upstream-sha.txt
+            versions-record.json
+            submodules-record.txt
+            macos-version.txt
+            xcode-version.txt
+            swift-version.txt
+            simulator-build-config.diff
+          if-no-files-found: warn
