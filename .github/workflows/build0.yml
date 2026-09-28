@@ -105,14 +105,10 @@ jobs:
             echo "result_exit_code=$(cat build0-exit-code.txt 2>/dev/null || echo unavailable)"
           } > build0-metadata.txt
           if [ -f build0.log ]; then shasum -a 256 build0.log > build0-log.sha256; fi
-          if [ -d upstream/bazel-bin ]; then
-            find -L upstream/bazel-bin/Telegram -maxdepth 2 -type d -name '*.app' -print 2>/dev/null > build0-artifact-paths.txt || true
-            while IFS= read -r app; do
-              archive="build0-simulator-app.zip"
-              ditto -c -k --sequesterRsrc --keepParent "$app" "$archive"
-              shasum -a 256 "$archive" > build0-artifact.sha256
-              break
-            done < build0-artifact-paths.txt
+          if [ -f upstream/bazel-bin/Telegram/Telegram.ipa ]; then
+            echo "bazel-bin/Telegram/Telegram.ipa" > build0-artifact-paths.txt
+            cp upstream/bazel-bin/Telegram/Telegram.ipa build0-simulator.ipa
+            shasum -a 256 build0-simulator.ipa > build0-artifact.sha256
           fi
       - name: Upload evidence
         if: always()
@@ -126,7 +122,7 @@ jobs:
             build0-log.sha256
             build0-artifact-paths.txt
             build0-artifact.sha256
-            build0-simulator-app.zip
+            build0-simulator.ipa
             build0-date.txt
             upstream-sha.txt
             versions-record.json
